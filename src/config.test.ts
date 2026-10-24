@@ -19,6 +19,8 @@ describe('loadConfig', () => {
     expect(loadConfig(REQUIRED)).toEqual({
       ...REQUIRED,
       LDAP_UID_ATTRIBUTE: 'uid',
+      ASSISTANTS_SCOPE: 'openid',
+      ASSISTANTS_REQUESTS_PER_MINUTE: 60,
       HTTP_HOST: '0.0.0.0',
       HTTP_PORT: 8080,
       LOG_LEVEL: 'info'
@@ -39,5 +41,19 @@ describe('loadConfig', () => {
     expect(() =>
       loadConfig({ ...REQUIRED, LDAP_BIND_DN: 'cn=admin,dc=example,dc=org' })
     ).toThrow('LDAP_BIND_PASSWORD: required with LDAP_BIND_DN')
+  })
+
+  it('serves the assistants with the whole harness only', () => {
+    const harness = {
+      ASSISTANTS_URL: 'http://apisix/b2b/agents',
+      ASSISTANTS_TOKEN_URL: 'https://auth.example.org/oauth2/token',
+      ASSISTANTS_CLIENT_ID: 'chat-side-service',
+      ASSISTANTS_CLIENT_SECRET: 'secret'
+    }
+
+    expect(loadConfig({ ...REQUIRED, ...harness })).toMatchObject(harness)
+    expect(() =>
+      loadConfig({ ...REQUIRED, ASSISTANTS_URL: harness.ASSISTANTS_URL })
+    ).toThrow('ASSISTANTS_TOKEN_URL: required with the others')
   })
 })

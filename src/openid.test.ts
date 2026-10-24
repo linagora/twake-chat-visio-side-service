@@ -1,7 +1,41 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { OpenId } from './openid.ts'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { OpenId, openIdUser, Refusal } from './openid.ts'
 import { startFake } from './testing.ts'
 import { UpstreamError } from './upstream.ts'
+
+describe('openIdUser', () => {
+  const token = { accessToken: 'openid', matrixServerName: 'example.org' }
+  const resolving = (user: string | null) => ({
+    userOf: vi.fn(() => Promise.resolve(user))
+  })
+
+  it('answers the user of this homeserver the token stands for', async () => {
+    expect(
+      await openIdUser(resolving('@alice:example.org'), 'example.org', token)
+    ).toBe('@alice:example.org')
+  })
+
+  it('refuses a token of another homeserver before asking anyone', async () => {
+    const openId = resolving('@alice:other.org')
+
+    await expect(
+      openIdUser(openId, 'example.org', {
+        ...token,
+        matrixServerName: 'other.org'
+      })
+    ).rejects.toMatchObject({ status: 403, errcode: 'M_FORBIDDEN' })
+    expect(openId.userOf).not.toHaveBeenCalled()
+  })
+
+  it('refuses a token the homeserver rejects, or one of a user of another homeserver', async () => {
+    await expect(
+      openIdUser(resolving(null), 'example.org', token)
+    ).rejects.toMatchObject({ status: 401, errcode: 'M_UNKNOWN_TOKEN' })
+    await expect(
+      openIdUser(resolving('@alice:other.org'), 'example.org', token)
+    ).rejects.toBeInstanceOf(Refusal)
+  })
+})
 
 const answers: Record<string, { status: number; body: unknown }> = {
   good: { status: 200, body: { sub: '@alice:example.org' } },

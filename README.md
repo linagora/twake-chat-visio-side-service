@@ -1,7 +1,7 @@
 # twake-chat-side-service
 
 Matrix application service of Twake Chat. It issues the call tokens through
-Meet.
+Meet and relays the assistants to twake-harness.
 Deploying it: [docs/deploy.md](docs/deploy.md).
 
 ## Development

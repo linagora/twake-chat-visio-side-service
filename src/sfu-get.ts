@@ -1,12 +1,12 @@
-import type { FastifyBaseLogger, FastifyReply, FastifyRequest } from 'fastify'
+import type { FastifyBaseLogger } from 'fastify'
 import { z } from 'zod'
 import type { CallRooms } from './call-rooms.ts'
 import type { Directory } from './directory.ts'
 import type { Homeserver } from './homeserver.ts'
-import { type HttpServer, matrixError } from './http.ts'
+import { corsFor, type HttpServer, matrixError, sendFailure } from './http.ts'
 import type { CallToken, Meet, Participant } from './meet.ts'
-import type { OpenId } from './openid.ts'
-import { RefusedError, UpstreamError } from './upstream.ts'
+import { type OpenId, openIdUser, Refusal } from './openid.ts'
+import { UpstreamError, withDeadline } from './upstream.ts'
 
 export interface SfuDeps {
   /** The homeserver whose users are served: the users of other homeservers are refused. */
@@ -47,51 +47,10 @@ interface Context {
   user?: string
 }
 
-/** Browsers call from the origin of their client; the request carries its credentials in the body. */
-function cors(
-  _request: FastifyRequest,
-  reply: FastifyReply,
-  payload: unknown
-): Promise<unknown> {
-  void reply.headers({
-    'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'POST',
-    'access-control-allow-headers': 'content-type'
-  })
-  return Promise.resolve(payload)
-}
+/** The request carries its credentials in its body. */
+const cors = corsFor('POST', 'content-type')
 
 const localpart = (userId: string) => userId.slice(1, userId.indexOf(':'))
-const serverName = (userId: string) => userId.slice(userId.indexOf(':') + 1)
-
-/** A request the service turns down itself, with the answer it gets. */
-class Refusal extends Error {
-  readonly status: number
-  readonly errcode: string
-
-  constructor(status: number, errcode: string, message: string) {
-    super(message)
-    this.status = status
-    this.errcode = errcode
-  }
-}
-
-function withDeadline<T>(work: Promise<T>, deadlineMs: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(
-        new UpstreamError(
-          'deadline',
-          `no answer within ${String(deadlineMs)} ms`
-        )
-      )
-    }, deadlineMs)
-  })
-  return Promise.race([work, deadline]).finally(() => {
-    clearTimeout(timer)
-  })
-}
 
 /**
  * `POST /sfu/get`, the token service of the MatrixRTC calls of Twake Chat (MSC4195 before
@@ -127,26 +86,10 @@ export function registerSfuGet(
       request.log.info(context, 'token minted')
       return token
     } catch (err) {
-      if (err instanceof Refusal || err instanceof RefusedError) {
-        const [status, errcode] =
-          err instanceof Refusal
-            ? [err.status, err.errcode]
-            : [403, 'M_FORBIDDEN']
-        request.log.info({ ...context, reason: err.message }, 'token refused')
-        return reply.code(status).send(matrixError(errcode, err.message))
-      }
-      if (err instanceof UpstreamError) {
-        request.log.warn(
-          { ...context, reason: err.message },
-          'upstream failure'
-        )
-        return reply
-          .code(502)
-          .send(
-            matrixError('M_UNKNOWN', 'A service the call depends on failed')
-          )
-      }
-      throw err
+      return sendFailure(reply, err, {
+        refused: 'token refused',
+        fields: { ...context }
+      })
     }
   })
 }
@@ -162,22 +105,11 @@ async function sfuToken(
     openid_token: openIdToken,
     device_id: deviceId
   } = request
-  const otherServer = new Refusal(
-    403,
-    'M_FORBIDDEN',
-    'Only the users of this homeserver are served'
-  )
-  if (openIdToken.matrix_server_name !== deps.serverName) throw otherServer
-  const userId = await deps.openId.userOf(openIdToken.access_token)
-  if (!userId) {
-    throw new Refusal(
-      401,
-      'M_UNKNOWN_TOKEN',
-      'The homeserver rejects the OpenID token'
-    )
-  }
+  const userId = await openIdUser(deps.openId, deps.serverName, {
+    accessToken: openIdToken.access_token,
+    matrixServerName: openIdToken.matrix_server_name
+  })
   context.user = userId
-  if (serverName(userId) !== deps.serverName) throw otherServer
   // The identity every MatrixRTC client derives for this device, and the one Meet takes
   const identity = `${userId}:${deviceId}`
   if (identity.length > MAX_LENGTH) {

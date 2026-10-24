@@ -1,10 +1,11 @@
 # Deploying
 
-The service is the MatrixRTC token service of the calls of Twake Chat. The
-client finds it in the client well-known and calls `POST /sfu/get` on it
-directly, with an OpenID token of its homeserver. The service checks the
-token and the membership with the homeserver, then asks Meet for the LiveKit
-token, in the Meet room of the Matrix room.
+The service is the side service of Twake Chat: the MatrixRTC token service of
+its calls, and the relay of its assistants to twake-harness (see
+[Assistants](#assistants)). The client finds it in the client well-known and
+calls `POST /sfu/get` on it directly, with an OpenID token of its homeserver.
+The service checks the token and the membership with the homeserver, then asks
+Meet for the LiveKit token, in the Meet room of the Matrix room.
 
 ```mermaid
 sequenceDiagram
@@ -47,6 +48,11 @@ lines (pino): one per refused token and per failure.
 - `POST /sfu/get`: public, reached by browsers of any origin (CORS `*`; the
   credentials are in the body). Expose it over HTTPS. It has no rate limit of
   its own: set one at the ingress if needed.
+- `GET`/`PUT /assistants/me`, `PUT /assistants/me/home`,
+  `POST /assistants/me/recover`, `GET`/`PUT /assistants/me/suggestions`:
+  public as well, with a rate limit per user and replica (see
+  [Assistants](#assistants)). The service checks the token with Synapse before
+  that limit: set a limit per IP at the ingress too.
 - Liveness: `GET /health/live`.
 - Readiness: `GET /health/ready`, 503 while Postgres does not answer within
   2 seconds.
@@ -73,6 +79,13 @@ All required unless a default is given.
   is required with a DN.
 - `LDAP_UID_ATTRIBUTE`: the attribute that holds the Matrix localpart, `uid`
   by default.
+- `ASSISTANTS_URL`, `ASSISTANTS_TOKEN_URL`, `ASSISTANTS_CLIENT_ID`,
+  `ASSISTANTS_CLIENT_SECRET`: all four or none, to serve the assistants (see
+  [Assistants](#assistants)). Without them, the assistant routes answer 404.
+- `ASSISTANTS_SCOPE`: the scope of the client credentials request, `openid` by
+  default (LemonLDAP-NG refuses a request without one).
+- `ASSISTANTS_REQUESTS_PER_MINUTE`: the assistant calls a user may make per
+  minute and replica, 60 by default.
 - `HTTP_HOST`, `HTTP_PORT`: `0.0.0.0` and 8080 by default.
 - `LOG_LEVEL`: `info` by default.
 
@@ -83,21 +96,26 @@ answers within 14 seconds.
 ## Well-known
 
 The client well-known (`/.well-known/matrix/client`) names the service under
-two keys, with the same URL:
+three keys, with the same URL:
 
-- `livekit_base_url`: the one Twake Chat reads (the Flutter client reads only
-  this one, the React client reads both);
-- `livekit_service_url`: the one of the MatrixRTC clients of Element.
+- `livekit_base_url`: the one Twake Chat reads for the calls (the Flutter
+  client reads only this one, the React client reads both);
+- `livekit_service_url`: the one of the MatrixRTC clients of Element;
+- `assistants.base_url` of the `app.twake.chat` object: the one Twake Chat
+  reads for the assistants. Without it, Twake Chat shows no assistant.
 
 ```json
 {
   "org.matrix.msc4143.rtc_foci": [
     {
       "type": "livekit",
-      "livekit_base_url": "https://visio.example.com",
-      "livekit_service_url": "https://visio.example.com"
+      "livekit_base_url": "https://chat-side.example.com",
+      "livekit_service_url": "https://chat-side.example.com"
     }
-  ]
+  ],
+  "app.twake.chat": {
+    "assistants": { "base_url": "https://chat-side.example.com" }
+  }
 }
 ```
 
@@ -117,6 +135,69 @@ two keys, with the same URL:
 - Meet hands the LiveKit tokens of a room to the application that created it
   only. Changing `MEET_CLIENT_ID` makes each Matrix room get a new Meet room at
   its next call.
+
+## Assistants
+
+The service relays the assistant of the user to the provisioning API of
+twake-harness, which owns the assistants as its application service. It reaches
+the harness through APISIX inside the cluster, never the browser, with a token
+of its own OIDC client.
+
+```mermaid
+sequenceDiagram
+    participant C as Twake Chat
+    participant V as Twake Chat side service
+    participant S as Synapse
+    participant O as LemonLDAP
+    participant A as APISIX (in cluster)
+    participant H as twake-harness
+    C->>V: PUT /assistants/me (Bearer OpenID token, x-matrix-server-name)
+    V->>S: openid/userinfo (who the token stands for)
+    V->>O: client credentials token (kept until it nearly expires)
+    V->>A: PUT /b2b/agents/v1/provisioning/assistants/{user}
+    A->>H: same request
+    H-->>V: {userId, deviceId, masterKey}
+    V-->>C: {userId, deviceId, masterKey}
+```
+
+- The client sends its OpenID token in `Authorization: Bearer` and the server
+  that issued it in `x-matrix-server-name`. The owner is always the user of the
+  token; the routes take no other.
+- The service answers what the harness answers, `Retry-After` included: a 503
+  while the assistant is not ready, which the client asks again. A refusal
+  keeps the `error` of the harness and gains an `errcode`: `M_BOT_NOT_FOUND` for
+  `no assistant`, `M_BOT_RECOVERY_NEEDED` for `recovery_needed`, `M_UNKNOWN`
+  for the other failures of its API. Any other answer, such as a route missing
+  at APISIX, is logged and answers 502.
+- A 401 or a 403 of the harness concerns the token of the service, never the
+  user's: the service asks a new token once on a 401, then answers 502. Its own
+  401 means the homeserver rejected the OpenID token.
+- More than `ASSISTANTS_REQUESTS_PER_MINUTE` calls of a user in a minute answer
+  429 `M_LIMIT_EXCEEDED` with a `Retry-After`. The count and the token are kept
+  by each replica, unshared.
+- A failure of the homeserver, LemonLDAP or the harness answers 502. The
+  harness gets 12 seconds per call, since `/home` waits for the assistant to
+  join the room. A request still pending after 14 seconds answers 503 with
+  `Retry-After: 5`, which the client asks again.
+
+To serve them:
+
+- `ASSISTANTS_URL`: the harness through APISIX, before its `/v1` routes, for
+  example `http://apisix-gateway.apisix.svc.cluster.local/b2b/agents`. On its
+  route `b2b-agents-api`
+  ([twake-workplace-cozy-apps](https://ci.linagora.com/linagora/lrs/saas/deployments/twake/twake-workplace-cozy-apps/-/blob/01eae4e5ac6dd19352e3f25553312e2e4ed50e2b/configs/apisix/apisix-contracts/values.yaml#L368)),
+  APISIX adds the shared secret of the harness itself, checks the token with
+  the JWKS of LemonLDAP-NG, and admits the pods of the cluster only: the
+  service runs in one.
+- An OIDC client of the service in LemonLDAP-NG, confidential, with the client
+  credentials grant, as the tenant ToM's client `tom-<tenant>` that the harness
+  already admits. Its access tokens must carry the issuer and the audience the
+  harness expects (`AUTH_ISSUER`, `AUTH_AUDIENCE`). `ASSISTANTS_TOKEN_URL` is
+  the token endpoint of LemonLDAP-NG, for example
+  `https://auth.example.com/oauth2/token`.
+- Its client id in `PROVISIONER_CLIENT_IDS` of the harness, which admits the
+  provisioners by the subject of their token.
+- The network: the service reaches APISIX and the token endpoint.
 
 ## LDAP
 

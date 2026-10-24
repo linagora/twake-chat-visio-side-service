@@ -37,16 +37,41 @@ export async function readJson(
   return body as Record<string, unknown>
 }
 
+/** A request still pending at its deadline: an `UpstreamError`, which a route may answer apart. */
+export class DeadlineError extends UpstreamError {
+  constructor(deadlineMs: number) {
+    super('deadline', `no answer within ${String(deadlineMs)} ms`)
+    this.name = 'DeadlineError'
+  }
+}
+
+/** The work, or a `DeadlineError` once `deadlineMs` passed, whatever is still pending. */
+export function withDeadline<T>(
+  work: Promise<T>,
+  deadlineMs: number
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new DeadlineError(deadlineMs))
+    }, deadlineMs)
+  })
+  return Promise.race([work, deadline]).finally(() => {
+    clearTimeout(timer)
+  })
+}
+
 /** `fetch`, with the timeout, and a network failure turned into an `UpstreamError`. */
 export async function call(
   service: string,
   url: string,
-  init: RequestInit = {}
+  init: RequestInit = {},
+  timeoutMs = UPSTREAM_TIMEOUT_MS
 ): Promise<Response> {
   try {
     return await fetch(url, {
       ...init,
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
+      signal: AbortSignal.timeout(timeoutMs)
     })
   } catch (err) {
     throw new UpstreamError(

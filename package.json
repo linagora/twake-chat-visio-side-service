@@ -1,7 +1,7 @@
 {
   "name": "twake-chat-side-service",
   "version": "0.1.0",
-  "description": "Matrix application service of Twake Chat that issues the call tokens through Meet",
+  "description": "Matrix application service of Twake Chat that issues the call tokens through Meet and relays the assistants to twake-harness",
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",

@@ -33,3 +33,45 @@ export class OpenId {
     return body.sub
   }
 }
+
+/** A request the service turns down itself, with the answer it gets. */
+export class Refusal extends Error {
+  readonly status: number
+  readonly errcode: string
+
+  constructor(status: number, errcode: string, message: string) {
+    super(message)
+    this.status = status
+    this.errcode = errcode
+  }
+}
+
+const serverOf = (userId: string) => userId.slice(userId.indexOf(':') + 1)
+
+/**
+ * The user an OpenID token stands for, a user of `serverName` only: the server the
+ * token claims is checked before the homeserver is asked, and the user it names after.
+ */
+export async function openIdUser(
+  openId: Pick<OpenId, 'userOf'>,
+  serverName: string,
+  token: { accessToken: string; matrixServerName: string }
+): Promise<string> {
+  const otherServer = () =>
+    new Refusal(
+      403,
+      'M_FORBIDDEN',
+      'Only the users of this homeserver are served'
+    )
+  if (token.matrixServerName !== serverName) throw otherServer()
+  const userId = await openId.userOf(token.accessToken)
+  if (!userId) {
+    throw new Refusal(
+      401,
+      'M_UNKNOWN_TOKEN',
+      'The homeserver rejects the OpenID token'
+    )
+  }
+  if (serverOf(userId) !== serverName) throw otherServer()
+  return userId
+}

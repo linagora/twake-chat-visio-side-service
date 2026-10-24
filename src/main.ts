@@ -1,9 +1,11 @@
 import { setTimeout as delay } from 'node:timers/promises'
 import { pino } from 'pino'
 import postgres from 'postgres'
+import { RateLimit, registerAssistants } from './assistants.ts'
 import { CallRooms } from './call-rooms.ts'
 import { loadConfig } from './config.ts'
 import { Directory } from './directory.ts'
+import { Harness } from './harness.ts'
 import { Homeserver } from './homeserver.ts'
 import { createServer } from './http.ts'
 import { handleSignals } from './lifecycle.ts'
@@ -45,9 +47,10 @@ const server = createServer({
       delay(2000).then(() => false)
     ])
 })
+const openId = new OpenId(config.MATRIX_HOMESERVER_URL)
 registerSfuGet(server, {
   serverName: config.MATRIX_SERVER_NAME,
-  openId: new OpenId(config.MATRIX_HOMESERVER_URL),
+  openId,
   homeserver: new Homeserver(config.MATRIX_HOMESERVER_URL, config.AS_TOKEN),
   directory: new Directory({
     url: config.LDAP_URL,
@@ -63,6 +66,27 @@ registerSfuGet(server, {
     serviceAccountEmail: config.MEET_SERVICE_ACCOUNT_EMAIL
   }),
   callRooms
+})
+const {
+  ASSISTANTS_URL: url,
+  ASSISTANTS_TOKEN_URL: tokenUrl,
+  ASSISTANTS_CLIENT_ID: clientId,
+  ASSISTANTS_CLIENT_SECRET: clientSecret
+} = config
+registerAssistants(server, {
+  serverName: config.MATRIX_SERVER_NAME,
+  openId,
+  harness:
+    url && tokenUrl && clientId && clientSecret
+      ? new Harness({
+          url,
+          tokenUrl,
+          clientId,
+          clientSecret,
+          scope: config.ASSISTANTS_SCOPE
+        })
+      : null,
+  rateLimit: new RateLimit(config.ASSISTANTS_REQUESTS_PER_MINUTE)
 })
 await server.listen({ host: config.HTTP_HOST, port: config.HTTP_PORT })
 

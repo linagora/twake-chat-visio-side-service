@@ -60,6 +60,7 @@ expect 'created its table' \
 expect 'answers the preflight of the browsers' "$(status -X OPTIONS "$API/sfu/get")" '204'
 expect 'refuses a token request of the wrong shape' \
   "$(status -X POST -H 'content-type: application/json' -d '{}' "$API/sfu/get")" '400'
+expect 'serves no assistants without a harness' "$(status "$API/assistants/me")" '404'
 
 docker kill -s TERM "$RUN-service" >/dev/null
 code="$(timeout 40 docker wait "$RUN-service" || echo timeout)"
